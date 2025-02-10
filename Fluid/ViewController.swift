@@ -31,9 +31,22 @@ struct FullScreenVertexIn {
     var texCoord: SIMD2<Float>
 }
 
+protocol FluidViewDelegate: NSObject {
+    func onKeyDown(with event: NSEvent)
+}
+
+class FluidView: MTKView {
+    override var acceptsFirstResponder: Bool { return true }
+    weak var keyDownDelegate: FluidViewDelegate?
+    
+    override func keyDown(with event: NSEvent) {
+        self.keyDownDelegate?.onKeyDown(with: event)
+    }
+}
+
 class ViewController: NSViewController {
     
-    var metalView: MTKView!
+    var metalView: FluidView!
     
     // Metal関連のプロパティ
     var device: MTLDevice!
@@ -67,7 +80,40 @@ class ViewController: NSViewController {
 //    中間テクスチャ
     var biliteralTexture: MTLTexture!
     
-    private var time: CGFloat = 0
+//    設定値
+    var camPostion: SIMD3<Float> = .init(x: 0, y: 0, z: -15)
+    var camUp: SIMD3<Float> = .init(x: 0, y: 1, z: 0)
+    var cameraTarget: SIMD3<Float> = .zero
+    var currentOrientation: simd_quatf = Quaternion.identity()
+    var lastMouseLocation: CGPoint?
+    let sensitivity: Float = 0.005
+    
+    let particleSize: Float = 0.6;
+    
+    let fullScreenIndices: [UInt16] = [
+        0,1,2,
+        2,1,3
+    ]
+    
+    var billboardPositions: [SIMD3<Float>] = []
+    var billboardIndices: [UInt16] = []
+    
+    func generateParticles(count: Int) {
+        for i in 0..<count {
+            let x = Float.random(in: -2...2)
+            let y = Float.random(in: -2...2)
+            let z = Float.random(in: -2...2)
+            
+            billboardPositions.append(.init(x: x, y: y, z: z))
+            
+            let index: UInt16 = UInt16(i) * 4
+            
+            billboardIndices.append(contentsOf: [
+                index, index+1, index+2,
+                index+2, index+1, index+3
+            ])
+        }
+    }
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -76,18 +122,20 @@ class ViewController: NSViewController {
         device = MTLCreateSystemDefaultDevice()
         
         // MTKViewの設定
-        metalView = MTKView(frame: CGRect(origin: .zero, size: .init(width: 512, height: 512)), device: device)
+        metalView = FluidView(frame: CGRect(origin: .zero, size: .init(width: 512, height: 512)), device: device)
         metalView.layer?.isOpaque = false
         metalView.delegate = self
         metalView.clearDepth = 1
         metalView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         metalView.depthStencilPixelFormat = .invalid
         metalView.drawableSize = metalView.frame.size
+        metalView.keyDownDelegate = self
         view.addSubview(metalView)
         
         // コマンドキューの作成
         commandQueue = device.makeCommandQueue()
         
+        generateParticles(count: 5000)
         // シェーダーの設定
         setUpTextures()
         setUpPipelineStates()
@@ -100,11 +148,8 @@ class ViewController: NSViewController {
     }
     
     private func setUpBuffer() {
-        let camPostion: SIMD3<Float> = .init(x: 0, y: 0, z: -15)
-        let camUpVec: SIMD3<Float> = .init(x: 0, y: 1, z: 0)
-        let particleSize: Float = 0.6;
         
-        let vMatrix = Matrix4.lookAt(eye: camPostion, center: .zero, up: camUpVec)
+        let vMatrix = Matrix4.lookAt(eye: camPostion, center: cameraTarget, up: camUp)
         let pMatrix = Matrix4.perspective(fovy: 45, aspect: Float(metalView.frame.width / metalView.frame.height), near: 5, far: 100)
         let invProjectionMatrix = pMatrix.inverse
         
@@ -118,18 +163,6 @@ class ViewController: NSViewController {
         
         uniformsBuffer = device.makeBuffer(bytes: &uniforms, length: MemoryLayout<Uniforms>.stride, options: [])!
         
-        let billboardPositions: [SIMD3<Float>] = [
-            .init(x: 0, y: 0, z: 0),
-            .init(x: 0.2, y: 0, z: 0)
-        ]
-        
-        let billboardIndices: [UInt16] = [
-            0,1,2,
-            2,1,3,
-            
-            4,5,6,
-            6,5,7,
-        ]
         
         positionBuffer = device.makeBuffer(bytes: billboardPositions, length: MemoryLayout<SIMD3<Float>>.stride * billboardPositions.count, options: [])!
         billboardIndexBuffer = device.makeBuffer(bytes: billboardIndices, length: MemoryLayout<UInt16>.stride * billboardIndices.count, options: [])!
@@ -142,11 +175,6 @@ class ViewController: NSViewController {
         ]
         
         fullScreenVertexBuffer = device.makeBuffer(bytes: fullScreenVertices, length: MemoryLayout<FullScreenVertexIn>.stride * fullScreenVertices.count, options: [])!
-        
-        let fullScreenIndices: [UInt16] = [
-            0,1,2,
-            2,1,3
-        ]
         
         fullScreenIndexBuffer = device.makeBuffer(bytes: fullScreenIndices, length: MemoryLayout<UInt16>.stride * fullScreenIndices.count, options: [])!
         
@@ -253,6 +281,49 @@ class ViewController: NSViewController {
         verticalBiliteralPassDescriptor.colorAttachments[0].storeAction = .store
         verticalBiliteralPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0)
     }
+    
+    override func mouseDown(with event: NSEvent) {
+        // ウィンドウ座標（通常、origin は左下ですが、アプリに合わせて調整）
+        lastMouseLocation = event.locationInWindow
+    }
+    
+    override func mouseDragged(with event: NSEvent) {
+        guard let lastLocation = lastMouseLocation else { return }
+        let currentLocation = event.locationInWindow
+        
+        // マウス移動量（ピクセル単位）
+        let deltaX = Float(currentLocation.x - lastLocation.x)
+        let deltaY = Float(currentLocation.y - lastLocation.y)
+        
+        // **横回転（ヨー）**
+        // 横ドラッグでは、世界座標系の Y 軸（0,1,0）を中心に回転させます
+        // マウスの X 方向の移動量に応じた回転角度（ラジアン）を計算
+        let horizontalAngle = -deltaX * sensitivity
+        let horizontalRotation = Quaternion.rotate(angle: horizontalAngle, axis: SIMD3<Float>(0, 1, 0))
+        
+        // **縦回転（ピッチ）**
+        // 縦ドラッグでは、現在の回転状態から求めたカメラの右方向（ローカル X 軸）を中心に回転させます
+        // マウスの Y 方向の移動量に応じた回転角度（ラジアン）を計算
+        let verticalAngle = -deltaY * sensitivity
+        // 現在の向きで右方向を求める（例えば、初期の右方向は (1,0,0)）
+        let rightAxis = currentOrientation.act(SIMD3<Float>(1, 0, 0))
+        let verticalRotation = Quaternion.rotate(angle: verticalAngle, axis: rightAxis)
+        
+        // **回転の合成**
+        // どちらの回転も現在の向きに合成します
+        // ※ クォータニオンの積は順序依存なので、今回は水平回転を先、縦回転を後に適用しています
+        currentOrientation = Quaternion.multiply(horizontalRotation, currentOrientation)
+        currentOrientation = Quaternion.multiply(verticalRotation, currentOrientation)
+        
+        // 現在のマウス位置を記憶（次回ドラッグとの差分計算に使用）
+        lastMouseLocation = currentLocation
+        
+        // ※ ここで、ViewController に対して「回転が変わった」旨を通知し、カメラの view matrix を更新するなどの処理を行ってもよいでしょう
+    }
+    
+    override func mouseUp(with event: NSEvent) {
+        lastMouseLocation = nil
+    }
 }
 
 extension ViewController: MTKViewDelegate {
@@ -262,6 +333,12 @@ extension ViewController: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        let rotatedEye = currentOrientation.act(camPostion)
+        let rotatedUp = currentOrientation.act(camUp)
+        let newVMatrix = Matrix4.lookAt(eye: rotatedEye, center: cameraTarget, up: rotatedUp)
+        let uniformsPointer = uniformsBuffer.contents().bindMemory(to: Uniforms.self, capacity: 1)
+        uniformsPointer.pointee.vMatrix = newVMatrix
+        
         let commandBuffer = commandQueue.makeCommandBuffer()
         let depthMapRenderEncoder = commandBuffer?.makeRenderCommandEncoder(descriptor: depthPassDescriptor)
         depthMapRenderEncoder?.setRenderPipelineState(depthMapPipeLineState)
@@ -270,7 +347,7 @@ extension ViewController: MTKViewDelegate {
         depthMapRenderEncoder?.setFragmentBuffer(uniformsBuffer, offset: 0, index: 0)
 //        深度書き込み用
         depthMapRenderEncoder?.setDepthStencilState(depthStentcilState)
-        depthMapRenderEncoder?.drawIndexedPrimitives(type: .triangle, indexCount: 12, indexType: .uint16, indexBuffer: billboardIndexBuffer, indexBufferOffset: 0)
+        depthMapRenderEncoder?.drawIndexedPrimitives(type: .triangle, indexCount: billboardIndices.count, indexType: .uint16, indexBuffer: billboardIndexBuffer, indexBufferOffset: 0)
         depthMapRenderEncoder?.endEncoding()
         
 //        blurをかけていく
@@ -310,3 +387,26 @@ extension ViewController: MTKViewDelegate {
     }
 }
 
+extension ViewController: FluidViewDelegate {
+    func onKeyDown(with event: NSEvent) {
+        // キーコードは macOS 固有のものになります
+        // 123: ←, 124: →, 125: ↓, 126: ↑
+        let moveSpeed: Float = 0.5
+        switch event.keyCode {
+        case 123: // 左
+            camPostion.x -= moveSpeed
+            cameraTarget.x -= moveSpeed
+        case 124: // 右
+            camPostion.x += moveSpeed
+            cameraTarget.x += moveSpeed
+        case 125: // 下
+            camPostion.y += moveSpeed
+            cameraTarget.y += moveSpeed
+        case 126: // 上
+            camPostion.y -= moveSpeed
+            cameraTarget.y -= moveSpeed
+        default:
+            break
+        }
+    }
+}
