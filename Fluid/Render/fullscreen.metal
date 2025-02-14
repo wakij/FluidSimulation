@@ -15,6 +15,8 @@ struct Uniforms {
     float2 texelSize;
     float size;
     float sphereRadius; //size/2
+    float3 dirLight;
+    float specularPower;
 };
 
 struct FullScreenVertexIn {
@@ -69,6 +71,7 @@ float3 getViewPosFromTexCoord(
 fragment float4 fullscreen_fragment(
                                     VertexOut in [[stage_in]],
                                     texture2d<float> texture [[ texture(0) ]],
+                                    texture2d<float> bgTexture [[ texture(1)]],
                                     constant Uniforms &uniform [[ buffer(0)]]
                                     )
 {
@@ -77,6 +80,12 @@ fragment float4 fullscreen_fragment(
     texCoord.y = 1.0 - texCoord.y;
 
     float depth = texture.sample(depthSampler, texCoord).r;
+    
+    float3 bgColor = bgTexture.sample(depthSampler, texCoord).rgb;
+    
+    if (depth < 0.1) {
+        return float4(float3(1.0), 1.0);
+    }
                     
     float3 viewPos = computeViewPosFromUVDepth(texCoord, depth, uniform.pMatrix, uniform.invProjectionMatrix);
 //
@@ -95,6 +104,25 @@ fragment float4 fullscreen_fragment(
     }
 //                    // 法線
     float3 normal = normalize(cross(ddx, ddy));
-    return float4(normal, 1.0);
+    
+    float3 rayDir = normalize(viewPos);
+    float3 lightDir = normalize((uniform.vMatrix * float4(uniform.dirLight,0.)).xyz); //変数がビュー空間上なのでライトの座標をビュー空間上に用意する必要がある。
+    float3 H = normalize(lightDir - rayDir);
+    float specular   = pow(max(0.0, dot(H, normal)), 250.);
+
+    float density = 1.5;
+
+    float thickness = exp(-length(texCoord - float2(0.5)) * 10.0) * 5.0;
+    float3 diffuseColor = float3(0.5, 0.9, 0.5);
+    float3 transmittance = exp(-density * thickness * (1.0 - diffuseColor));
+                    
+    float3 refractionDir = refract(rayDir, normal, 1.0/1.333);
+    float4 transmitted = bgTexture.sample(depthSampler, float2(texCoord + refractionDir.xy * thickness * 0.1));
+    float3 refractionColor = transmitted.rgb * transmittance;
+
+    float fresnel = clamp(0.2 + (1.0 - 0.2) * pow(1.0 - dot(normal, rayDir), 5.0), 0., 1.0);
+    float3 reflectionColor = bgColor;
+    float3 finalColor = mix(refractionColor, reflectionColor, fresnel) + specular;
+    return float4(finalColor, 1.0);
 }
 

@@ -4,19 +4,69 @@
 //
 //  Created by wakita tomoshige on 2025/02/08.
 //
-
 import Cocoa
 import Metal
 import MetalKit
 import simd
 
+struct Particle {
+    var position: SIMD3<Float>
+    var v: SIMD3<Float>
+    var force: SIMD3<Float>
+    var density: Float
+    var nearDensity: Float
+}
+
+func initDambreak(initHalfBoxSize: SIMD3<Float>, numParticles: Int, kernelRadius: Float) -> [Particle] {
+    var particles: [Particle] = []
+    let distFactor: Float = 0.5  // 間隔係数
+     
+    // X方向の開始・終了位置（左右0.95倍）
+    let startX = -initHalfBoxSize.x * 0.95
+    let endX = initHalfBoxSize.x * 0.95
+    
+    // Y方向の開始位置（下側0.95倍） ※外側ループは粒子数に達するまで続ける
+    let startY = initHalfBoxSize.y * 0.95
+    
+    // Z方向は下側から0まで（0 * initHalfBoxSize.z は0になります）
+    let startZ = -initHalfBoxSize.z * 0.95
+    let endZ: Float = 0.0
+    
+    var y = startY
+    // 外側ループは粒子数に達するまでループします
+    while particles.count < numParticles {
+        var x = startX
+        while x < endX && particles.count < numParticles {
+            var z = startZ
+            while z < endZ && particles.count < numParticles {
+                // 少しだけランダムなジッターを加える
+                let jitter = Float.random(in: 0..<0.001)
+                let pos = SIMD3<Float>(x + jitter, y + jitter, z + jitter)
+                let particle = Particle(position: pos,
+                                        v: SIMD3<Float>(repeating: 0),
+                                        force: SIMD3<Float>(repeating: 0),
+                                        density: 0,
+                                        nearDensity: 0)
+                particles.append(particle)
+                z += distFactor * kernelRadius
+            }
+            x += distFactor * kernelRadius
+        }
+        y -= distFactor * kernelRadius
+    }
+    
+    return particles
+}
+
 struct Uniforms {
     var vMatrix: simd_float4x4
-    var pMatrix: simd_float4x4;
-    var invProjectionMatrix: simd_float4x4;
+    var pMatrix: simd_float4x4
+    var invProjectionMatrix: simd_float4x4
     var texelSize: simd_float2
     var size: Float
     var sphereRadius: Float //size/2
+    var dirLight: SIMD3<Float>
+    var specularPower: Float
 }
 
 struct BiliteralUniforms {
@@ -44,6 +94,73 @@ class FluidView: MTKView {
     }
 }
 
+struct Environment {
+    var xGrids: Int32
+    var yGrids: Int32
+    var zGrids: Int32
+    var cellSize: Float
+    var xHalf: Float
+    var yHalf: Float
+    var zHalf: Float
+    var offset: Float
+    
+    init() {
+        let kernelRadius = 0.07
+        self.cellSize = Float(1.0 * kernelRadius)
+        self.xHalf = 0.7
+        self.yHalf = 2.0
+        self.zHalf = 0.7
+        let xLen = 2.0 * xHalf
+        let yLen = 2.0 * yHalf
+        let zLen = 2.0 * zHalf
+        let sentinel = 4 * cellSize
+        self.xGrids = Int32(ceil((xLen + sentinel) / cellSize))
+        self.yGrids = Int32(ceil((yLen + sentinel) / cellSize))
+        self.zGrids = Int32(ceil((zLen + sentinel) / cellSize))
+        self.offset = sentinel / 2;
+    }
+    
+    func gridNum() -> Int32 {
+        return xGrids * yGrids * zGrids
+    }
+}
+
+struct SPHParams {
+    var mass: Float
+    var kernelRadius: Float
+    var kernelRadiusPow2: Float
+    var kernelRadiusPow5: Float
+    var kernelRadiusPow6: Float
+    var kernelRadiusPow9: Float
+    var dt: Float
+    var stiffness: Float
+    var nearStiffness: Float
+    var restDensity: Float
+    var viscosity: Float
+    var n: UInt32
+    
+    init(n: UInt32) {
+        self.mass = 1.0
+        self.kernelRadius = 0.07
+        self.kernelRadiusPow2 = pow(self.kernelRadius, 2)
+        self.kernelRadiusPow5 = pow(self.kernelRadius, 5)
+        self.kernelRadiusPow6 = pow(self.kernelRadius, 6)
+        self.kernelRadiusPow9 = pow(self.kernelRadius, 9)
+        self.stiffness = 20
+        self.nearStiffness = 1.0
+        self.restDensity = 15000
+        self.viscosity = 100
+        self.dt = 0.002 //すっごい数値的に不安定
+        self.n = n
+    }
+}
+
+struct RealBoxSize {
+    var xHalf: Float
+    var yHalf: Float
+    var zHalf: Float
+}
+
 class ViewController: NSViewController {
     
     var metalView: FluidView!
@@ -52,77 +169,51 @@ class ViewController: NSViewController {
     var device: MTLDevice!
     var commandQueue: MTLCommandQueue!
     
-    var depthMapPipeLineState: MTLRenderPipelineState!
-    var biliteralPipeLineState: MTLRenderPipelineState!
-    var resultPipeLineState: MTLRenderPipelineState!
-    
-    var depthStentcilState: MTLDepthStencilState!
-    
 //    bufferを関連
     var uniformsBuffer: MTLBuffer!
-    var positionBuffer: MTLBuffer!
-    var billboardIndexBuffer: MTLBuffer!
-    
-    var fullScreenVertexBuffer: MTLBuffer!
-    var fullScreenIndexBuffer: MTLBuffer!
-    
-    var horizontalBiliterlUniformBuffer: MTLBuffer!
-    var verticalBiliterlUniformBuffer: MTLBuffer!
-    
-//    descriptor
-    var depthPassDescriptor: MTLRenderPassDescriptor!
-    var horizontalBiliteralPassDescriptor: MTLRenderPassDescriptor!
-    var verticalBiliteralPassDescriptor: MTLRenderPassDescriptor!
-    
-//    texture関連
-    var depthMapTexture: MTLTexture!
-    var depthTestTexture: MTLTexture!
-//    中間テクスチャ
-    var biliteralTexture: MTLTexture!
+    var particleBuffer: MTLBuffer!
+    var sortedParticleBuffer: MTLBuffer!
+    var prefixSumBuffer: MTLBuffer!
+    var sphEnvironmentBuffer: MTLBuffer!
+    var sphParamsBuffer: MTLBuffer!
+    var realBoxSizeBuffer: MTLBuffer!
+    var cellParticleCountBuffer: MTLBuffer!
+    var particleCellOffsetBuffer: MTLBuffer!
     
 //    設定値
-    var camPostion: SIMD3<Float> = .init(x: 0, y: 0, z: -15)
+    var camPostion: SIMD3<Float> = .init(x: 0, y: 0, z: -5)
     var camUp: SIMD3<Float> = .init(x: 0, y: 1, z: 0)
     var cameraTarget: SIMD3<Float> = .zero
     var currentOrientation: simd_quatf = Quaternion.identity()
     var lastMouseLocation: CGPoint?
     let sensitivity: Float = 0.005
     
-    let particleSize: Float = 0.6;
+    let particleSize: Float = 0.08;
+    let particleNum: UInt32 = 10000;
     
-    let fullScreenIndices: [UInt16] = [
-        0,1,2,
-        2,1,3
-    ]
+    var sphEnv: Environment!
+    var sphParams: SPHParams!
     
-    var billboardPositions: [SIMD3<Float>] = []
-    var billboardIndices: [UInt16] = []
     
-    func generateParticles(count: Int) {
-        for i in 0..<count {
-            let x = Float.random(in: -2...2)
-            let y = Float.random(in: -2...2)
-            let z = Float.random(in: -2...2)
-            
-            billboardPositions.append(.init(x: x, y: y, z: z))
-            
-            let index: UInt16 = UInt16(i) * 4
-            
-            billboardIndices.append(contentsOf: [
-                index, index+1, index+2,
-                index+2, index+1, index+3
-            ])
-        }
-    }
+    var prefixSumKenel: PrefixSum!
+    var countSortKenel: CountSort!
+    
+    var gridBuildKernel: GridBuilder!
+    var fluidRender: FluidRenderer!
+    var particleUtil: ParticleUtil!
+    var sphSimulator: SPHSimluator!
+    
+    var realBoxSize: RealBoxSize!
     
     override func viewDidLoad() {
         super.viewDidLoad()
         
         // Metalデバイスの取得
         device = MTLCreateSystemDefaultDevice()
+        guard let library = device.makeDefaultLibrary() else { return }
         
         // MTKViewの設定
-        metalView = FluidView(frame: CGRect(origin: .zero, size: .init(width: 512, height: 512)), device: device)
+        metalView = FluidView(frame: CGRect(origin: .zero, size: .init(width: 1024, height: 512)), device: device)
         metalView.layer?.isOpaque = false
         metalView.delegate = self
         metalView.clearDepth = 1
@@ -135,22 +226,24 @@ class ViewController: NSViewController {
         // コマンドキューの作成
         commandQueue = device.makeCommandQueue()
         
-        generateParticles(count: 5000)
-        // シェーダーの設定
-        setUpTextures()
-        setUpPipelineStates()
-        setUpPassDescriptors()
+        self.sphParams = SPHParams(n: particleNum)
+        self.sphEnv = Environment()
+        self.realBoxSize = RealBoxSize(xHalf: sphEnv.xHalf, yHalf: sphEnv.yHalf, zHalf: sphEnv.zHalf)
         
-        setUpBuffer()
+        let testParaticles = initDambreak(initHalfBoxSize: .init(x: sphEnv.xHalf, y: sphEnv.yHalf, z: sphEnv.zHalf), numParticles: Int(particleNum), kernelRadius: 0.07)
+        particleBuffer = device.makeBuffer(bytes: testParaticles, length: MemoryLayout<Particle>.stride * Int(particleNum), options: [])
+        sortedParticleBuffer = device.makeBuffer(length: MemoryLayout<Particle>.stride * Int(particleNum), options: [])!
+        prefixSumBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride * Int(sphEnv.gridNum()), options: [])!
+        sphEnvironmentBuffer = device.makeBuffer(bytes: &sphEnv, length: MemoryLayout<Environment>.stride, options: [])!
+        sphParamsBuffer = device.makeBuffer(bytes: &sphParams, length: MemoryLayout<SPHParams>.stride, options: [])!
+        realBoxSizeBuffer = device.makeBuffer(bytes: &realBoxSize, length: MemoryLayout<RealBoxSize>.stride, options: [])!
+        cellParticleCountBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride * Int(sphEnv.gridNum()), options: [])!
+        particleCellOffsetBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride * Int(particleNum), options: [])!
         
-        self.view.wantsLayer = true
-        self.view.layer?.backgroundColor = NSColor.lightGray.cgColor
-    }
-    
-    private func setUpBuffer() {
+        let positionBuffer = device.makeBuffer(length: MemoryLayout<SIMD3<Float>>.stride * Int(particleNum), options: [])!
         
         let vMatrix = Matrix4.lookAt(eye: camPostion, center: cameraTarget, up: camUp)
-        let pMatrix = Matrix4.perspective(fovy: 45, aspect: Float(metalView.frame.width / metalView.frame.height), near: 5, far: 100)
+        let pMatrix = Matrix4.perspective(fovy: 45, aspect: Float(metalView.frame.width / metalView.frame.height), near: 0.01, far: 10)
         let invProjectionMatrix = pMatrix.inverse
         
         var uniforms = Uniforms(
@@ -159,127 +252,85 @@ class ViewController: NSViewController {
             invProjectionMatrix: invProjectionMatrix,
             texelSize: .init(x: 1.0 / Float(metalView.frame.width), y: 1.0 / Float(metalView.frame.height)),
             size: particleSize,
-            sphereRadius: particleSize/2.0)
+            sphereRadius: particleSize,
+            dirLight: .init(x: 0, y: 10, z: -10),
+            specularPower: 5
+        )
         
         uniformsBuffer = device.makeBuffer(bytes: &uniforms, length: MemoryLayout<Uniforms>.stride, options: [])!
         
+        gridBuildKernel = try! GridBuilder(
+            device: device,
+            library: library,
+            particleBuffer: particleBuffer,
+            cellParticleCountBuffer: cellParticleCountBuffer,
+            particleCellOffsetBuffer: particleCellOffsetBuffer,
+            environmentBuffer: sphEnvironmentBuffer,
+            particleNum: Int(particleNum),
+            gridNum: Int(sphEnv.gridNum()))
         
-        positionBuffer = device.makeBuffer(bytes: billboardPositions, length: MemoryLayout<SIMD3<Float>>.stride * billboardPositions.count, options: [])!
-        billboardIndexBuffer = device.makeBuffer(bytes: billboardIndices, length: MemoryLayout<UInt16>.stride * billboardIndices.count, options: [])!
+        sphSimulator = try! .init(
+            device: device,
+            library: library,
+            particleBuffer: particleBuffer,
+            sortedParticleBuffer: sortedParticleBuffer,
+            prefixSumBuffer: prefixSumBuffer,
+            environmentBuffer: sphEnvironmentBuffer,
+            sphParamsBuffer: sphParamsBuffer,
+            realBoxSizeBuffer: realBoxSizeBuffer,
+            particleNum: particleNum)
         
-        let fullScreenVertices: [FullScreenVertexIn] = [
-            .init(position: .init(x: -1, y: 1), texCoord: .init(x: 0, y: 0)),
-            .init(position: .init(x: 1, y: 1), texCoord: .init(x: 1, y: 0)),
-            .init(position: .init(x: -1, y: -1), texCoord: .init(x: 0, y: 1)),
-            .init(position: .init(x: 1, y: -1), texCoord: .init(x: 1, y: 1))
-        ]
+        let fluidRenderParams: FluidRenderParams = .init(
+            particleSize: particleSize,
+            height: Float(metalView.frame.height),
+            particleNum: particleNum)
         
-        fullScreenVertexBuffer = device.makeBuffer(bytes: fullScreenVertices, length: MemoryLayout<FullScreenVertexIn>.stride * fullScreenVertices.count, options: [])!
+        fluidRender = try! FluidRenderer(
+            device: device,
+            library: library,
+            metalView: metalView,
+            params: fluidRenderParams,
+            uniformBuffer: uniformsBuffer,
+            positionBuffer: positionBuffer)
         
-        fullScreenIndexBuffer = device.makeBuffer(bytes: fullScreenIndices, length: MemoryLayout<UInt16>.stride * fullScreenIndices.count, options: [])!
+        particleUtil = try! .init(
+            device: device,
+            library: library,
+            particleBuffer: particleBuffer,
+            positionBuffer: positionBuffer,
+            particleNum: Int(particleNum))
         
-        let blurMaxFilterSize: Int32 = 100
-        let blurFilterSize: Int32 = 7
-        let blurDepthScale: Float = 10
-        let depthThreshold: Float = (particleSize / 2.0) * blurDepthScale;
-        let projectedParticleConstant = (Float(blurFilterSize) * Float(particleSize) * 0.05 * (Float(metalView.frame.height) / 2.0)) /  tan(((45.0 * Float.pi) / 180.0) / 2.0)
+        prefixSumKenel = try! .init(
+            device: device,
+            library: library,
+            gridNum: Int(sphEnv.gridNum()),
+            inputBuffer: cellParticleCountBuffer,
+            outputBuffer: prefixSumBuffer)
         
-        var horizontalBiliterlUniform: BiliteralUniforms = .init(
-            maxFilterSize: blurMaxFilterSize,
-            blurDir: .init(x: 1.0 / Float(metalView.frame.width), y: 0.0),
-            projectedParticleConstant: projectedParticleConstant,
-            depthThreshold: depthThreshold)
-        horizontalBiliterlUniformBuffer = device.makeBuffer(bytes: &horizontalBiliterlUniform, length: MemoryLayout<BiliteralUniforms>.stride, options: [])!
+        countSortKenel = try! .init(
+            device: device,
+            library: library,
+            sourceParticlesBuffer: particleBuffer,
+            targetParticlesBuffer: sortedParticleBuffer,
+            cellParticleCountPrefixSumBuffer: prefixSumBuffer,
+            particleCellOffsetBuffer: particleCellOffsetBuffer,
+            environmentBuffer: sphEnvironmentBuffer,
+            sphParamsBuffer: sphParamsBuffer,
+            particleNum: particleNum)
         
-        var verticalBiliterlUniform: BiliteralUniforms = .init(
-            maxFilterSize: blurMaxFilterSize,
-            blurDir: .init(x: 0.0, y: 1.0 / Float(metalView.frame.height)),
-            projectedParticleConstant: projectedParticleConstant,
-            depthThreshold: depthThreshold)
-        verticalBiliterlUniformBuffer = device.makeBuffer(bytes: &verticalBiliterlUniform, length: MemoryLayout<BiliteralUniforms>.stride, options: [])!
-        
+        self.view.wantsLayer = true
+        self.view.layer?.backgroundColor = NSColor.lightGray.cgColor
     }
     
-    private func setUpTextures() {
-//        非線形深度を書き込んで深度テストに用いる
-        let depthTestTextureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .depth16Unorm,
-            width: Int(metalView.drawableSize.width),
-            height: Int(metalView.drawableSize.height),
-            mipmapped: false)
-        depthTestTextureDescriptor.usage = [.renderTarget]
-        depthTestTexture = device.makeTexture(descriptor: depthTestTextureDescriptor)
-        
-//        線形深度を書き込む
-        let depthMapTextureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r32Float,
-            width: Int(metalView.drawableSize.width),
-            height: Int(metalView.drawableSize.height),
-            mipmapped: false)
-        depthMapTextureDescriptor.usage = [.renderTarget, .shaderRead]
-        depthMapTexture = device.makeTexture(descriptor: depthMapTextureDescriptor)
-        
-        let biliteralTextureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r32Float,
-            width: Int(metalView.drawableSize.width),
-            height: Int(metalView.drawableSize.height),
-            mipmapped: false)
-        biliteralTextureDescriptor.usage = [.renderTarget, .shaderRead]
-        biliteralTexture = device.makeTexture(descriptor: biliteralTextureDescriptor)
+    func cellPosition(v: SIMD3<Float>, env: Environment) -> SIMD3<Int32> {
+        let xi = Int32(floor((v.x + env.xHalf + env.offset) / env.cellSize));
+        let yi = Int32(floor((v.y + env.yHalf + env.offset) / env.cellSize));
+        let zi = Int32(floor((v.z + env.zHalf + env.offset) / env.cellSize));
+        return SIMD3<Int32>(xi, yi, zi);
     }
-    
-    private func setUpPipelineStates() {
-        guard let library = device.makeDefaultLibrary() else { return }
-        
-//        非線形深度を深度バッファに書き込む+カラーバッファに線形深度を書き込む
-        let depthMapdescriptor = MTLRenderPipelineDescriptor()
-        depthMapdescriptor.vertexFunction = library.makeFunction(name: "sphere_vertex")
-        depthMapdescriptor.fragmentFunction = library.makeFunction(name: "sphere_fragment")
-        depthMapdescriptor.depthAttachmentPixelFormat = .depth16Unorm
-        depthMapdescriptor.colorAttachments[0].pixelFormat = .r32Float //線形深度をrに書き込む
-        depthMapPipeLineState = try! device.makeRenderPipelineState(descriptor: depthMapdescriptor)
-        
-//        深度を書き込むためのなんか
-        let depthStencilDescriptor = MTLDepthStencilDescriptor()
-        depthStencilDescriptor.depthCompareFunction = .less  // 例: 小さい値が手前と判断
-        depthStencilDescriptor.isDepthWriteEnabled = true      // 深度値の書き込みを有効にする
-        depthStentcilState = device.makeDepthStencilState(descriptor: depthStencilDescriptor)
-        
-        let biliteralDescriptor = MTLRenderPipelineDescriptor()
-        biliteralDescriptor.vertexFunction = library.makeFunction(name: "biliteral_vertex")
-        biliteralDescriptor.fragmentFunction = library.makeFunction(name: "biliteral_fragment")
-        biliteralDescriptor.colorAttachments[0].pixelFormat = .r32Float //線形深度をrに書き込む
-        biliteralPipeLineState = try! device.makeRenderPipelineState(descriptor: biliteralDescriptor)
-        
-        let fullscreenDescriptor = MTLRenderPipelineDescriptor()
-        fullscreenDescriptor.vertexFunction = library.makeFunction(name: "fullscreen_vertex")
-        fullscreenDescriptor.fragmentFunction = library.makeFunction(name: "fullscreen_fragment")
-        fullscreenDescriptor.colorAttachments[0].pixelFormat = metalView.colorPixelFormat
-        resultPipeLineState = try! device.makeRenderPipelineState(descriptor: fullscreenDescriptor)
-    }
-    
-    private func setUpPassDescriptors() {
-        depthPassDescriptor = MTLRenderPassDescriptor()
-        depthPassDescriptor.colorAttachments[0].texture = depthMapTexture
-        depthPassDescriptor.depthAttachment.texture = depthTestTexture
-        depthPassDescriptor.depthAttachment.clearDepth = 1.0
-        depthPassDescriptor.depthAttachment.loadAction = .clear
-        depthPassDescriptor.depthAttachment.storeAction = .store
-        depthPassDescriptor.colorAttachments[0].loadAction = .clear
-        depthPassDescriptor.colorAttachments[0].storeAction = .store
-        depthPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0)
-        
-        horizontalBiliteralPassDescriptor = MTLRenderPassDescriptor()
-        horizontalBiliteralPassDescriptor.colorAttachments[0].texture = biliteralTexture
-        horizontalBiliteralPassDescriptor.colorAttachments[0].loadAction = .clear
-        horizontalBiliteralPassDescriptor.colorAttachments[0].storeAction = .store
-        horizontalBiliteralPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0)
-        
-        verticalBiliteralPassDescriptor = MTLRenderPassDescriptor()
-        verticalBiliteralPassDescriptor.colorAttachments[0].texture = depthMapTexture
-        verticalBiliteralPassDescriptor.colorAttachments[0].loadAction = .clear
-        verticalBiliteralPassDescriptor.colorAttachments[0].storeAction = .store
-        verticalBiliteralPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0)
+
+    func cellNumberFromId(xi: Int32, yi: Int32, zi: Int32, env: Environment) -> Int32 {
+        return xi + yi * env.xGrids + zi * env.xGrids * env.yGrids;
     }
     
     override func mouseDown(with event: NSEvent) {
@@ -317,8 +368,6 @@ class ViewController: NSViewController {
         
         // 現在のマウス位置を記憶（次回ドラッグとの差分計算に使用）
         lastMouseLocation = currentLocation
-        
-        // ※ ここで、ViewController に対して「回転が変わった」旨を通知し、カメラの view matrix を更新するなどの処理を行ってもよいでしょう
     }
     
     override func mouseUp(with event: NSEvent) {
@@ -339,51 +388,28 @@ extension ViewController: MTKViewDelegate {
         let uniformsPointer = uniformsBuffer.contents().bindMemory(to: Uniforms.self, capacity: 1)
         uniformsPointer.pointee.vMatrix = newVMatrix
         
-        let commandBuffer = commandQueue.makeCommandBuffer()
-        let depthMapRenderEncoder = commandBuffer?.makeRenderCommandEncoder(descriptor: depthPassDescriptor)
-        depthMapRenderEncoder?.setRenderPipelineState(depthMapPipeLineState)
-        depthMapRenderEncoder?.setVertexBuffer(uniformsBuffer, offset: 0, index: 0)
-        depthMapRenderEncoder?.setVertexBuffer(positionBuffer, offset: 0, index: 1)
-        depthMapRenderEncoder?.setFragmentBuffer(uniformsBuffer, offset: 0, index: 0)
-//        深度書き込み用
-        depthMapRenderEncoder?.setDepthStencilState(depthStentcilState)
-        depthMapRenderEncoder?.drawIndexedPrimitives(type: .triangle, indexCount: billboardIndices.count, indexType: .uint16, indexBuffer: billboardIndexBuffer, indexBufferOffset: 0)
-        depthMapRenderEncoder?.endEncoding()
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                let drawable = metalView.currentDrawable else { return }
         
-//        blurをかけていく
-        for _ in 0..<4 {
-            let horizontalBlurRenderEncoder = commandBuffer?.makeRenderCommandEncoder(descriptor: horizontalBiliteralPassDescriptor)
-            horizontalBlurRenderEncoder?.setRenderPipelineState(biliteralPipeLineState)
-            horizontalBlurRenderEncoder?.setVertexBuffer(fullScreenVertexBuffer, offset: 0, index: 0)
-            horizontalBlurRenderEncoder?.setFragmentTexture(depthMapTexture, index: 0)
-            horizontalBlurRenderEncoder?.setFragmentBuffer(horizontalBiliterlUniformBuffer, offset: 0, index: 0)
-            horizontalBlurRenderEncoder?.drawIndexedPrimitives(type: .triangle, indexCount: 6, indexType: .uint16, indexBuffer: fullScreenIndexBuffer, indexBufferOffset: 0)
-            horizontalBlurRenderEncoder?.endEncoding()
+        for _ in 0..<2 {
+    //        copyする
+            gridBuildKernel.clean(commandBuffer: commandBuffer)
+            gridBuildKernel.build(commandBuffer: commandBuffer)
             
-            let verticalBlurRenderEncoder = commandBuffer?.makeRenderCommandEncoder(descriptor: verticalBiliteralPassDescriptor)
-            verticalBlurRenderEncoder?.setRenderPipelineState(biliteralPipeLineState)
-            verticalBlurRenderEncoder?.setVertexBuffer(fullScreenVertexBuffer, offset: 0, index: 0)
-            verticalBlurRenderEncoder?.setFragmentTexture(biliteralTexture, index: 0)
-            verticalBlurRenderEncoder?.setFragmentBuffer(verticalBiliterlUniformBuffer, offset: 0, index: 0)
-            verticalBlurRenderEncoder?.drawIndexedPrimitives(type: .triangle, indexCount: 6, indexType: .uint16, indexBuffer: fullScreenIndexBuffer, indexBufferOffset: 0)
-            verticalBlurRenderEncoder?.endEncoding()
+    //        累積部分和を計算する -> ソートする
+            prefixSumKenel.execute(commandBuffer: commandBuffer)
+            countSortKenel.excute(commandBuffer: commandBuffer)
+            
+    //        シミュレーションを行う
+            sphSimulator.excute(commandBuffer: commandBuffer)
         }
         
-//        深度マップの作成
-        // レンダリングの開始
-        guard let drawable = metalView.currentDrawable, let renderPassDescriptor = metalView.currentRenderPassDescriptor else { return }
+//        シミュレーション結果から描画に必要なものを取り出す
+        particleUtil.copy(commandBuffer: commandBuffer)
+        fluidRender.render(commandBuffer: commandBuffer, metalView: metalView)
         
-        renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-        let renderEncoder = commandBuffer?.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
-        renderEncoder?.setRenderPipelineState(resultPipeLineState)
-        renderEncoder?.setVertexBuffer(fullScreenVertexBuffer, offset: 0, index: 0)
-        renderEncoder?.setFragmentTexture(biliteralTexture, index: 0)
-        renderEncoder?.setFragmentBuffer(uniformsBuffer, offset: 0, index: 0)
-        renderEncoder?.drawIndexedPrimitives(type: .triangle, indexCount: 6, indexType: .uint16, indexBuffer: fullScreenIndexBuffer, indexBufferOffset: 0)
-        renderEncoder?.endEncoding()
-        
-        commandBuffer?.present(drawable)
-        commandBuffer?.commit()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
     }
 }
 
