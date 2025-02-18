@@ -12,6 +12,7 @@ struct Particle {
     float3 position;
     float3 v;
     float3 force;
+    float3 lastAcceration;
     float density;
     float nearDensity;
 };
@@ -48,9 +49,9 @@ float nearDensityKernel(float r, SPHParams params) {
     return scale * d * d * d;
 }
 
-float densityKernel(float r, SPHParams params){
+float densityKernel(float r2, SPHParams params){
     float scale = 315.0 / (64. * 3.1415926535 * params.kernelRadiusPow9);
-    float dd = params.kernelRadiusPow2 - r * r;
+    float dd = params.kernelRadiusPow2 - r2;
     return scale * dd * dd * dd;
 }
 
@@ -98,7 +99,7 @@ kernel void computeDensity(
                         float r2 = dot(pos_i - pos_j, pos_i - pos_j);
                         
                        if (r2 < params.kernelRadiusPow2) {
-                           particles[tid].density += params.mass * densityKernel(sqrt(r2), params);
+                           particles[tid].density += params.mass * densityKernel(r2, params);
                            particles[tid].nearDensity += params.mass * nearDensityKernel(sqrt(r2), params);
                        }
                    }

@@ -12,6 +12,7 @@ struct Particle {
     float3 position;
     float3 v;
     float3 force;
+    float3 lastAcceration;
     float density;
     float nearDensity;
 };
@@ -65,6 +66,7 @@ float nearDensityKernelGradient(float r, SPHParams params) {
     return scale * d * d;
 }
 
+//粘性
 float viscosityKernelLaplacian(float r, SPHParams params) {
     float scale = 45.0 / (3.1415926535 * params.kernelRadiusPow6);
     float d = params.kernelRadius - r;

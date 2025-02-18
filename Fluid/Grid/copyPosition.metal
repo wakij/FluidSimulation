@@ -14,6 +14,7 @@ struct Particle {
     float3 position;
     float3 v;
     float3 force;
+    float3 lastAcceration;
     float density;
     float nearDensity;
 };

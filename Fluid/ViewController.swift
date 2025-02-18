@@ -13,6 +13,7 @@ struct Particle {
     var position: SIMD3<Float>
     var v: SIMD3<Float>
     var force: SIMD3<Float>
+    var lastAcceration: SIMD3<Float>
     var density: Float
     var nearDensity: Float
 }
@@ -45,6 +46,7 @@ func initDambreak(initHalfBoxSize: SIMD3<Float>, numParticles: Int, kernelRadius
                 let particle = Particle(position: pos,
                                         v: SIMD3<Float>(repeating: 0),
                                         force: SIMD3<Float>(repeating: 0),
+                                        lastAcceration: .zero,
                                         density: 0,
                                         nearDensity: 0)
                 particles.append(particle)
@@ -107,9 +109,9 @@ struct Environment {
     init() {
         let kernelRadius = 0.07
         self.cellSize = Float(1.0 * kernelRadius)
-        self.xHalf = 0.7
+        self.xHalf = 2.0
         self.yHalf = 2.0
-        self.zHalf = 0.7
+        self.zHalf = 2.0
         let xLen = 2.0 * xHalf
         let yLen = 2.0 * yHalf
         let zLen = 2.0 * zHalf
@@ -146,11 +148,11 @@ struct SPHParams {
         self.kernelRadiusPow5 = pow(self.kernelRadius, 5)
         self.kernelRadiusPow6 = pow(self.kernelRadius, 6)
         self.kernelRadiusPow9 = pow(self.kernelRadius, 9)
-        self.stiffness = 20
+        self.stiffness = 20 //最終的な水面の厚みに影響を与えている 値が大きくと動きがダイナミックになって不安定になる
         self.nearStiffness = 1.0
-        self.restDensity = 15000
-        self.viscosity = 100
-        self.dt = 0.002 //すっごい数値的に不安定
+        self.restDensity = 15000 //初期状態と大きく乖離していると不安定性の原因になる
+        self.viscosity = 100 //粘性を上げれば数値的に安定する
+        self.dt = 0.005
         self.n = n
     }
 }
@@ -213,7 +215,7 @@ class ViewController: NSViewController {
         guard let library = device.makeDefaultLibrary() else { return }
         
         // MTKViewの設定
-        metalView = FluidView(frame: CGRect(origin: .zero, size: .init(width: 1024, height: 512)), device: device)
+        metalView = FluidView(frame: CGRect(origin: .zero, size: .init(width: 512, height: 512)), device: device)
         metalView.layer?.isOpaque = false
         metalView.delegate = self
         metalView.clearDepth = 1
@@ -228,9 +230,9 @@ class ViewController: NSViewController {
         
         self.sphParams = SPHParams(n: particleNum)
         self.sphEnv = Environment()
-        self.realBoxSize = RealBoxSize(xHalf: sphEnv.xHalf, yHalf: sphEnv.yHalf, zHalf: sphEnv.zHalf)
+        self.realBoxSize = RealBoxSize(xHalf: 0.7, yHalf: 2.0, zHalf: 0.7)
         
-        let testParaticles = initDambreak(initHalfBoxSize: .init(x: sphEnv.xHalf, y: sphEnv.yHalf, z: sphEnv.zHalf), numParticles: Int(particleNum), kernelRadius: 0.07)
+        let testParaticles = initDambreak(initHalfBoxSize: .init(x: realBoxSize.xHalf, y: realBoxSize.yHalf, z: realBoxSize.zHalf), numParticles: Int(particleNum), kernelRadius: 0.07)
         particleBuffer = device.makeBuffer(bytes: testParaticles, length: MemoryLayout<Particle>.stride * Int(particleNum), options: [])
         sortedParticleBuffer = device.makeBuffer(length: MemoryLayout<Particle>.stride * Int(particleNum), options: [])!
         prefixSumBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride * Int(sphEnv.gridNum()), options: [])!
@@ -388,6 +390,9 @@ extension ViewController: MTKViewDelegate {
         let uniformsPointer = uniformsBuffer.contents().bindMemory(to: Uniforms.self, capacity: 1)
         uniformsPointer.pointee.vMatrix = newVMatrix
         
+        let realBoxPointer = realBoxSizeBuffer.contents().bindMemory(to: RealBoxSize.self, capacity: 1)
+        realBoxPointer.pointee.xHalf = realBoxSize.xHalf
+        
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
                 let drawable = metalView.currentDrawable else { return }
         
@@ -401,7 +406,11 @@ extension ViewController: MTKViewDelegate {
             countSortKenel.excute(commandBuffer: commandBuffer)
             
     //        シミュレーションを行う
-            sphSimulator.excute(commandBuffer: commandBuffer)
+            sphSimulator.updateDensity(commandBuffer: commandBuffer)
+//            ソート済みparticleBufferに上のdensity計算の結果が書き込まれていないので書き込む
+            countSortKenel.excute(commandBuffer: commandBuffer)
+            sphSimulator.updateForce(commandBuffer: commandBuffer)
+            sphSimulator.updatePosition(commandBuffer: commandBuffer)
         }
         
 //        シミュレーション結果から描画に必要なものを取り出す
@@ -431,6 +440,12 @@ extension ViewController: FluidViewDelegate {
         case 126: // 上
             camPostion.y -= moveSpeed
             cameraTarget.y -= moveSpeed
+        case 29:
+            break
+//            realBoxSize.xHalf *= 0.95
+        case 49:
+            break
+//            realBoxSize.xHalf *= 1.1
         default:
             break
         }

@@ -45,12 +45,10 @@ class SPHSimluator {
         self.numThreadGroups = (Int(particleNum) + threadsPerThreadGroup - 1) / threadsPerThreadGroup
     }
     
-    func excute(commandBuffer: MTLCommandBuffer) {
-        
+    func setInitDensity(commandBuffer: MTLCommandBuffer) {
         let threadsPerThreadgroup = MTLSize(width: Int(threadsPerThreadGroup), height: 1, depth: 1)
         let threadgroups = MTLSize(width: numThreadGroups, height: 1, depth: 1)
         
-//        密度を計算
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
         computeEncoder.setComputePipelineState(densityPSO)
         computeEncoder.setBuffer(particlesBuffer, offset: 0, index: 0)
@@ -73,6 +71,45 @@ class SPHSimluator {
         
         computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
         computeEncoder.endEncoding()
+    }
+    
+    func updateDensity(commandBuffer: MTLCommandBuffer) {
+        let threadsPerThreadgroup = MTLSize(width: Int(threadsPerThreadGroup), height: 1, depth: 1)
+        let threadgroups = MTLSize(width: numThreadGroups, height: 1, depth: 1)
+        
+//        密度を計算
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        computeEncoder.setComputePipelineState(densityPSO)
+        computeEncoder.setBuffer(particlesBuffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(sortedParticlesBuffer, offset: 0, index: 1)
+        computeEncoder.setBuffer(prefixSumBuffer, offset: 0, index: 2)
+        computeEncoder.setBuffer(environmentBuffer, offset: 0, index: 3)
+        computeEncoder.setBuffer(sphParamsBuffer, offset: 0, index: 4)
+        
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+    }
+    
+    func updateForce(commandBuffer: MTLCommandBuffer) {
+        let threadsPerThreadgroup = MTLSize(width: Int(threadsPerThreadGroup), height: 1, depth: 1)
+        let threadgroups = MTLSize(width: numThreadGroups, height: 1, depth: 1)
+        
+//        力を計算
+        guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        computeEncoder.setComputePipelineState(forcePSO)
+        computeEncoder.setBuffer(particlesBuffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(sortedParticlesBuffer, offset: 0, index: 1)
+        computeEncoder.setBuffer(prefixSumBuffer, offset: 0, index: 2)
+        computeEncoder.setBuffer(environmentBuffer, offset: 0, index: 3)
+        computeEncoder.setBuffer(sphParamsBuffer, offset: 0, index: 4)
+        
+        computeEncoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+    }
+    
+    func updatePosition(commandBuffer: MTLCommandBuffer) {
+        let threadsPerThreadgroup = MTLSize(width: Int(threadsPerThreadGroup), height: 1, depth: 1)
+        let threadgroups = MTLSize(width: numThreadGroups, height: 1, depth: 1)
         
 //        座標を更新
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { return }

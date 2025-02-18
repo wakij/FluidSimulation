@@ -12,6 +12,7 @@ struct Particle {
     float3 position;
     float3 v;
     float3 force;
+    float3 lastAcceration;
     float density;
     float nearDensity;
 };
@@ -70,11 +71,9 @@ kernel void integrate(
 
             a += xForce + yForce + zForce;
             
-//            particles[tid].position += particles[tid].v * params.dt + 0.5 * a * params.dt * params.dt;
-//            particles[tid].v += 0.5 * ( prev_a + a ) * params.dt; //prev_aは前回のフレームのaという意味
-            
             particles[tid].v += params.dt * a;
             particles[tid].position += params.dt * particles[tid].v;
+            particles[tid].lastAcceration = a;
       }
     }
 }
