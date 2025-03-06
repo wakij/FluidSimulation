@@ -60,6 +60,17 @@ func initDambreak(initHalfBoxSize: SIMD3<Float>, numParticles: Int, kernelRadius
     return particles
 }
 
+func initCube() -> [Particle] {
+    var particles: [Particle] = []
+    for _ in 0..<10000 {
+        let x = Float.random(in: -0.2..<0.2)
+        let y = Float.random(in: 1.6..<2.0)
+        let z = Float.random(in: -0.2..<0.2)
+        particles.append(Particle(position: .init(x: x, y: y, z: z), v: .zero, force: .zero, lastAcceration: .zero, density: 0, nearDensity: 0))
+    }
+    return particles
+}
+
 struct Uniforms {
     var vMatrix: simd_float4x4
     var pMatrix: simd_float4x4
@@ -139,6 +150,7 @@ struct SPHParams {
     var nearStiffness: Float
     var restDensity: Float
     var viscosity: Float
+    var surfaceTensionCoefficient: Float
     var n: UInt32
     
     init(n: UInt32) {
@@ -152,7 +164,8 @@ struct SPHParams {
         self.nearStiffness = 1.0
         self.restDensity = 15000 //初期状態と大きく乖離していると不安定性の原因になる
         self.viscosity = 100 //粘性を上げれば数値的に安定する
-        self.dt = 0.005
+        self.dt = 0.006
+        self.surfaceTensionCoefficient = 2.0
         self.n = n
     }
 }
@@ -233,6 +246,7 @@ class ViewController: NSViewController {
         self.realBoxSize = RealBoxSize(xHalf: 0.7, yHalf: 2.0, zHalf: 0.7)
         
         let testParaticles = initDambreak(initHalfBoxSize: .init(x: realBoxSize.xHalf, y: realBoxSize.yHalf, z: realBoxSize.zHalf), numParticles: Int(particleNum), kernelRadius: 0.07)
+//        let testParaticles = initCube()
         particleBuffer = device.makeBuffer(bytes: testParaticles, length: MemoryLayout<Particle>.stride * Int(particleNum), options: [])
         sortedParticleBuffer = device.makeBuffer(length: MemoryLayout<Particle>.stride * Int(particleNum), options: [])!
         prefixSumBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride * Int(sphEnv.gridNum()), options: [])!

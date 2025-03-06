@@ -23,7 +23,7 @@ struct VertexOut {
     float2 uv;
 };
 
-vertex VertexOut sphere_vertex(
+vertex VertexOut depthMap_vertex(
                              uint vid [[vertex_id]],
                              constant Uniforms &uniforms [[buffer(0)]],
                              constant float3 *positions [[buffer(1)]]
@@ -48,11 +48,11 @@ vertex VertexOut sphere_vertex(
 
 
 struct FragmentOutput {
-    float4 color [[color(0)]];
+    float color [[color(0)]];
     float depth [[depth(any)]];
 };
 
-fragment FragmentOutput spehre_fragment(VertexOut in [[stage_in]],
+fragment FragmentOutput depthMap_fragment(VertexOut in [[stage_in]],
                                       constant Uniforms &uniform [[buffer(0)]]
                               )
 {
@@ -68,9 +68,8 @@ fragment FragmentOutput spehre_fragment(VertexOut in [[stage_in]],
     float4 realViewPos = float4(in.viewPos + normal * uniform.sphereRadius, 1.0);
     float4 clipSpacePos = uniform.pMatrix * realViewPos;
     
-    out.color = float4(normal * 0.5 + 0.5, 1.0);
+    out.color = realViewPos.z;
     out.depth = (clipSpacePos.z / clipSpacePos.w);
     
     return out;
 }
-

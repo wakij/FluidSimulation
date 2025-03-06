@@ -17,7 +17,6 @@ class PrefixSum {
     let numBlocksBuffer: MTLBuffer
     let nBuffer: MTLBuffer
     
-    
     init(device: MTLDevice, library: MTLLibrary, gridNum: Int, inputBuffer: MTLBuffer, outputBuffer: MTLBuffer) throws {
         guard let blockScanFunction = library.makeFunction(name: "blockScanKernel"),
               let scanBlockSumsFunction = library.makeFunction(name: "scanBlockSumsKernel"),
@@ -93,4 +92,3 @@ class PrefixSum {
         }
     }
 }
-

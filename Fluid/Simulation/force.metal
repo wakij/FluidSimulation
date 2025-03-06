@@ -73,6 +73,26 @@ float viscosityKernelLaplacian(float r, SPHParams params) {
     return scale * d;
 }
 
+//表面張力
+float surfaceTensionKernel(float r, SPHParams params) {
+    float scale = 315 / (64 * 3.1415926535 * params.kernelRadiusPow9);
+    float d = (params.kernelRadiusPow2 - r * r);
+    return scale * d * d;
+}
+
+float3 surfaceTensionKernelGradient(float rNorm, float3 r, SPHParams params) {
+    float scale = -945 / (32 * 3.1415926535 * params.kernelRadiusPow9);
+    float d = (params.kernelRadiusPow2 - rNorm * rNorm);
+    return (scale * d * d) * r;
+}
+
+float surfaceTensionKernelLaplacian(float r, SPHParams params) {
+    float scale = -945 / (32 * 3.1415926535 * params.kernelRadiusPow9);
+    float d = (params.kernelRadiusPow2 - r * r);
+    float dd = 3 * params.kernelRadiusPow2 - 7 * r * r;
+    return scale * d * dd;
+}
+
 kernel void computeForce(
                          device Particle *particles [[buffer(0)]],
                          device const Particle *sortedParticles [[buffer(1)]],
@@ -87,6 +107,10 @@ kernel void computeForce(
         float3 pos_i = particles[tid].position;
         float3 fPress = float3(0.0, 0.0, 0.0);
         float3 fVisc = float3(0.0, 0.0, 0.0);
+        
+//        表面張力
+        float3 cGradient = float3(0.0, 0.0, 0.0);
+        float cLaplacian = 0;
 
         int3 v = cellPosition(pos_i, env);
         if (v.x < env.xGrids && 0 <= v.x &&
@@ -110,6 +134,7 @@ kernel void computeForce(
                             if (density_j == 0. || nearDensity_j == 0.) {
                                 continue;
                             }
+//                            近傍にある場合
                             if (r2 < params.kernelRadiusPow2 && 1e-30 < r2) {
                                 float r = sqrt(r2);
                                 float pressure_i = params.stiffness * (density_i - params.restDensity);
@@ -123,15 +148,18 @@ kernel void computeForce(
                                 fPress += -params.mass * nearSharedPressure * dir * nearDensityKernelGradient(r, params) / nearDensity_j;
                                 float3 relativeSpeed = sortedParticles[j].v - particles[tid].v;
                                 fVisc += params.mass * relativeSpeed * viscosityKernelLaplacian(r, params) / density_j;
+                                
+                                cGradient += params.mass * surfaceTensionKernelGradient(r, pos_i - pos_j, params) / density_j;
+                                cLaplacian += params.mass * surfaceTensionKernelLaplacian(r, params);
                             }
                         }
                     }
                 }
             }
         }
-
         fVisc *= params.viscosity;
         float3 fGrv = density_i * float3(0.0, 9.8, 0.0);
+//        float3 surfaceTension = -0.05 * cLaplacian * normalize(cGradient);
         particles[tid].force = fPress + fVisc + fGrv;
     }
 }

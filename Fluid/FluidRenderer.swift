@@ -125,8 +125,8 @@ class FluidRenderer {
     private func setUpPipelineStates(device: MTLDevice, library: MTLLibrary, metalView: MTKView) {
 //        非線形深度を深度バッファに書き込む+カラーバッファに線形深度を書き込む
         let depthMapdescriptor = MTLRenderPipelineDescriptor()
-        depthMapdescriptor.vertexFunction = library.makeFunction(name: "sphere_vertex")
-        depthMapdescriptor.fragmentFunction = library.makeFunction(name: "sphere_fragment")
+        depthMapdescriptor.vertexFunction = library.makeFunction(name: "depthMap_vertex")
+        depthMapdescriptor.fragmentFunction = library.makeFunction(name: "depthMap_fragment")
         depthMapdescriptor.depthAttachmentPixelFormat = .depth16Unorm
         depthMapdescriptor.colorAttachments[0].pixelFormat = .r32Float //線形深度をrに書き込む
         self.depthMapPipeLineState = try! device.makeRenderPipelineState(descriptor: depthMapdescriptor)
@@ -148,6 +148,22 @@ class FluidRenderer {
         fullscreenDescriptor.fragmentFunction = library.makeFunction(name: "fullscreen_fragment")
         fullscreenDescriptor.colorAttachments[0].pixelFormat = metalView.colorPixelFormat
         self.resultPipeLineState = try! device.makeRenderPipelineState(descriptor: fullscreenDescriptor)
+    }
+    
+    private func setUpPipelineStates2(device: MTLDevice, library: MTLLibrary, metalView: MTKView) {
+//        非線形深度を深度バッファに書き込む+カラーバッファに線形深度を書き込む
+        let spheredescriptor = MTLRenderPipelineDescriptor()
+        spheredescriptor.vertexFunction = library.makeFunction(name: "sphere_vertex")
+        spheredescriptor.fragmentFunction = library.makeFunction(name: "sphere_fragment")
+        spheredescriptor.depthAttachmentPixelFormat = .depth16Unorm
+        spheredescriptor.colorAttachments[0].pixelFormat = metalView.colorPixelFormat
+        self.depthMapPipeLineState = try! device.makeRenderPipelineState(descriptor: spheredescriptor)
+        
+//        深度を書き込むためのなんか
+        let depthStencilDescriptor = MTLDepthStencilDescriptor()
+        depthStencilDescriptor.depthCompareFunction = .less  // 例: 小さい値が手前と判断
+        depthStencilDescriptor.isDepthWriteEnabled = true      // 深度値の書き込みを有効にする
+        self.depthStentcilState = device.makeDepthStencilState(descriptor: depthStencilDescriptor)!
     }
     
     private func setUpPassDescriptors() {
@@ -173,6 +189,7 @@ class FluidRenderer {
         verticalBiliteralPassDescriptor.colorAttachments[0].storeAction = .store
         verticalBiliteralPassDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0)
     }
+    
     private func setUpBuffer(device: MTLDevice, metalView: MTKView) {
         billboardIndexBuffer = device.makeBuffer(bytes: billboardIndices, length: MemoryLayout<UInt16>.stride * billboardIndices.count, options: [])!
         

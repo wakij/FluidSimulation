@@ -94,4 +94,3 @@ kernel void countSort(
         }
     }
 }
-
